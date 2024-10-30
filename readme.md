@@ -1,1 +1,1 @@
-# Custom Object Detection Repository
+# Vision Conglomerate
