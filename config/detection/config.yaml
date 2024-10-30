@@ -1,0 +1,92 @@
+model_config:
+  train_anchors: True
+  backbone: CSPBasedBackBone
+  neck: RepBiPANNeck
+  head: EffiDeHead
+
+  # backbone configs
+  cspbasedbackbone_config:
+    width_multiple: 0.5
+    depth_multiple: 0.3
+    c3_depths: null
+    channel_outs: null
+    dropout: 0.0
+
+  resnetbackbone_config:
+    block: BasicBlock
+    block_layers: [1, 1, 1, 1]
+    dropout: 0.0
+
+  # neck configs
+  repbipanneck_config:
+    width_multiple: 0.5
+    depth_multiple: 0.3
+    channel_outs: null
+    repblock_depths: null
+    cspsppf_poolk: 5
+    upsample_mode: "nearest"
+    bic_with_conv: False
+
+  bipanneck_config:
+    width_multiple: 0.5
+    depth_multiple: 0.3
+    channel_outs: null
+    c3_depths: null
+    sppf_poolk: 5
+    upsample_mode: "nearest"
+    bic_with_conv: False
+
+  # head configs
+  effidehead_config:
+    width_multiple: 0.5
+    reg_fmap_depth: 1
+    cls_fmap_depth: 1
+
+  basichead_config:
+    width_multiple: 0.5
+    
+auto_anchors_config:
+  threshold: 4.0
+  score_tol: 0.8
+  bpr_tol: 1.0
+  num_generations: 100
+  kmeans_iter: 50
+  mut_proba: 0.9
+  sigma: 0.1
+  update_anchors_cfg: True
+
+train_config:
+  device: cuda
+  data_path: data/detection
+
+  dataloader_config:
+    shuffle: True
+    # num_workers: 1
+
+  img_config:
+    img_ext: "png"
+    img_wh: [640, 640]
+
+  loss_config:
+    alpha: null
+    anchor_t: 4.0
+    batch_scale_loss: False 
+    box_w: 0.1
+    class_w: 0.3
+    conf_w: 1.0
+    edge_t: 0.5
+    gamma: null
+    label_smoothing: 0.001
+
+  optimizer_config:
+    betas: [0.9, 0.999]
+    eps: 1.0e-08
+    lr: 1.0e-3
+    name: Adam
+    weight_decay: 0.0
+
+  lr_scheduler_config:
+    T_0: 200
+    T_mult: 1
+    eta_min: 1.0e-06 
+    name: CosineAnnealingWarmRestarts

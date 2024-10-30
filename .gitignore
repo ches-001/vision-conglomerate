@@ -1,0 +1,13 @@
+venv
+model_output
+data
+notebook_outputs
+saved_model
+**/__pycache__
+kaggle.json
+nb.ipynb
+test_txts
+test_vid
+.env
+outputs
+classmap
