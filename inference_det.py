@@ -16,22 +16,21 @@ from PIL import Image
 from datetime import datetime
 from torch.utils.data import Dataset, IterableDataset, DataLoader
 from dataset.inference_dataset import SingleImgSample, InferenceImgDataset, InferenceVideoDataset
-from modules.segmentation import SegmentationNetwork
+from modules.detection import DetectionNetwork
 from utils.utils import(
     load_yaml, 
     xywh2x1y1x2y2,
     x1y1x2y22xywh,
     apply_bboxes, 
     apply_bboxes_from_tracks, 
-    apply_segments,
-    apply_keypoints,
+    apply_keypoints, 
     detection_summary_df
 )
 from typing import *
 
-STORAGE_PATH = os.path.join("outputs", "segmentation", str(datetime.now()).replace(":", "_"))
-CLASS_MAP_PATH = os.path.join("classmap", "segmentation", "classmap.json")
-ANCHORS_PATH = os.path.join("config", "segmentation", "anchors.yaml")
+STORAGE_PATH = os.path.join("outputs", "detection", str(datetime.now()).replace(":", "_"))
+CLASS_MAP_PATH = os.path.join("classmap", "detection", "classmap.json")
+ANCHORS_PATH = os.path.join("config", "detection", "anchors.yaml")
 LOG_FORMAT="%(asctime)s %(levelname)s %(filename)s: %(message)s"
 LOG_DATE_FORMAT="%Y-%m-%d %H:%M:%S"
 
@@ -40,7 +39,6 @@ logger = logging.getLogger(__name__)
 def post_process_preds(
         imgs: torch.Tensor,
         preds: torch.Tensor, 
-        protos: torch.Tensor, 
         num_classes: int, 
         colormap: Optional[np.ndarray]=None,
         iou_threshold: float=0.5,
@@ -53,21 +51,18 @@ def post_process_preds(
         start_idx: int=0,
         box_allowance: Optional[int]=None,
     ) -> Optional[pd.DataFrame]:
-    # k = num_masks; na=num_anchors; m = (ny *nx * na)_sm + (ny *nx * na)_md + (ny *nx * na)_lg
     # img shape: (N, C, H, W)
-    # preds shape: (N, m, 5+ncls+k+(kp or 0))
-    # protos shape: (N, k, W, H)
+    # preds shape: (N, m, 5+ncls+(kp or 0))
     if colormap is None:
         colormap = np.random.randint(0, 255, size=(num_classes, 3))
-    batch_size, bboxes_per_batch, num_masks = preds.shape[0], preds.shape[1], protos.shape[1]
+    batch_size, bboxes_per_batch = preds.shape[0], preds.shape[1]
     confidneces = torch.sigmoid(preds[..., :1])
     classes = torch.sigmoid(preds[..., 1:1+num_classes])
     scores = torch.max(classes, dim=-1)[0].unsqueeze(dim=-1) * confidneces
     xywh = preds[..., 1+num_classes:5+num_classes]
-    mask_coefs = preds[..., 5+num_classes:5+num_classes+num_masks]
-    keypoints = preds[..., 5+num_classes+num_masks:]
+    keypoints = preds[...,  5+num_classes:]
     
-    assert classes.shape[-1] == num_classes and mask_coefs.shape[-1] == (preds.shape[-1] - (5 + num_classes))
+    assert classes.shape[-1] == num_classes
     sample_idxs = torch.zeros(batch_size * bboxes_per_batch, dtype=torch.int64, device=preds.device)
     idx = 0
     for i in range(0, sample_idxs.shape[0], bboxes_per_batch):
@@ -79,7 +74,6 @@ def post_process_preds(
     xywh = xywh.reshape(-1, 4)
     if box_allowance:
         xywh[:, 2:] += box_allowance
-    mask_coefs = mask_coefs.reshape(-1, mask_coefs.shape[-1])
     keypoints = keypoints.reshape(math.prod(keypoints.shape[:-1]), keypoints.shape[-1])
     x1y1x2y2 = xywh2x1y1x2y2(xywh)
     keep_idxs = torchvision.ops.batched_nms(
@@ -94,7 +88,6 @@ def post_process_preds(
     classes = classes[keep_idxs][m]
     sample_idxs = sample_idxs[keep_idxs][m]
     x1y1x2y2 = x1y1x2y2[keep_idxs][m]
-    mask_coefs = mask_coefs[keep_idxs][m]
     keypoints = keypoints[keep_idxs][m]
     if keypoints.shape[0] > 0 and keypoints.shape[-1] > 0:
         keypoints = keypoints.reshape(*keypoints.shape[:-1], -1, 5)
@@ -105,25 +98,20 @@ def post_process_preds(
         x1y1x2y2
     ], dim=-1)
     summary = []
+
     for idx, i in enumerate(sample_idxs.unique()):
         m = (sample_idxs == i)
         img = imgs[i]
         # boxes format (confidence, class_idx, x1, y1, x2, y2)
         boxes = pred_boxes[m]
-        coefs = mask_coefs[m]
         kp = keypoints[m]
         # classes (class indexes) to track
         if tracked_classes:
             tracked_obj_mask = torch.isin(boxes[:, 1], torch.tensor(tracked_classes, device=device))
             boxes = boxes[tracked_obj_mask]
-            coefs = coefs[tracked_obj_mask]
-        if boxes.shape[0] == 0 or coefs.shape[0] == 0:
+        if boxes.shape[0] == 0:
             logger.info(f"frame {start_idx + idx} has no detected boxes")
             continue
-        masks = (coefs @ protos[i].reshape(num_masks, -1)).reshape(-1, *protos.shape[2:]).sigmoid()
-        masks = F.interpolate(masks.unsqueeze(dim=0), size=img.shape[1:], mode="bilinear", align_corners=False)
-        masks = torch.gt(masks, other=0.5).squeeze(dim=0).detach().cpu().numpy()
-        masks_colormap = colormap[boxes[:, 1].squeeze().long().cpu().numpy()]
         # img type is already in uint8, so no need to convert from float32 to uint8
         img = img.permute(1, 2, 0).contiguous().detach().cpu().numpy()
         apply_bboxes_kwargs = {
@@ -135,18 +123,16 @@ def post_process_preds(
         if not tracker:
             boxes = boxes.detach().cpu().numpy()
             img = apply_bboxes(img, boxes, **apply_bboxes_kwargs)
-            img = apply_segments(img, masks, alpha=0.5, colormap=masks_colormap)
             if kp.shape[-1] > 0:
                 kp = kp.reshape(-1, kp.shape[-1]).cpu().numpy()
                 img = apply_keypoints(img, kp)
         else:
             # boxes = torch.concat([boxes[:, 2:], boxes[:, :2]], dim=1)
-            boxes = boxes.detach().cpu().numpy()
+            boxes = boxes.cpu().numpy()
             detections = sv.Detections(
                 xyxy=boxes[:, 2:], 
                 confidence=boxes[:, 0], 
                 class_id=boxes[:, 1],
-                mask=masks,
                 data={"keypoints": kp.cpu().numpy()} if kp.shape[-1] > 0 else {}
             )
             detections = tracker.update_with_detections(detections)
@@ -154,7 +140,6 @@ def post_process_preds(
                 logger.info(f"frame {start_idx + idx} has no tracked detections")
                 continue
             img, boxes = apply_bboxes_from_tracks(img, detections, **apply_bboxes_kwargs)
-            img = apply_segments(img, detections.mask, alpha=0.5, colormap=masks_colormap)
             if detections.data.get("keypoints") is not None:
                 kp = detections.data["keypoints"].reshape(-1, kp.shape[-1])
                 img = apply_keypoints(img, kp)
@@ -184,7 +169,7 @@ def post_process_preds(
 
 def evaluate_frames(
         dataset: Union[SingleImgSample, Dataset, IterableDataset],
-        model: SegmentationNetwork, 
+        model: DetectionNetwork, 
         batch_size: int=32,
         num_workers: int=0,
         device: Union[int, str]="cpu",
@@ -213,7 +198,7 @@ def evaluate_frames(
             touched_img, og_img = dataset[0]
             touched_img = touched_img.to(device).unsqueeze(0)
             og_img = og_img.to(device).unsqueeze(0)
-            preds, protos = model(
+            preds = model(
                 touched_img, 
                 combine_scales=True, 
                 to_img_scale=True, 
@@ -222,7 +207,6 @@ def evaluate_frames(
             summary = post_process_preds(
                 og_img,
                 preds,
-                protos,
                 num_classes=num_classes,
                 classmap=classmap,
                 colormap=colormap,
@@ -232,12 +216,27 @@ def evaluate_frames(
             summary = None
             if isinstance(dataset, IterableDataset):
                 if num_workers > 0:
-                    logger.warning("num workers will be set to 0 when processing video stream")
+                    logger.warning("num workers will be set to 0 when processing video")
                     num_workers = 0
-            dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+                if batch_size > 1:
+                    logger.warning("batch size will be set to 1 when processing video")
+                    batch_size = 1
+
+                _iter = dataset
+                _unsqueeze_sample = True
+            else:
+                _iter = DataLoader(
+                    dataset, 
+                    batch_size=batch_size, 
+                    shuffle=False, 
+                    num_workers=num_workers
+                )
+                _unsqueeze_sample = False
+                
             vwriter = None
             start_idx = 0
-            for i, (touched_img_batch, og_img_batch) in tqdm.tqdm(enumerate(dataloader)):
+            for i, (touched_img_batch, og_img_batch) in tqdm.tqdm(enumerate(_iter)):
                 if is_video and (vwriter is None):
                     w, h = og_img_batch.shape[-1], og_img_batch.shape[-2]
                     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -249,7 +248,11 @@ def evaluate_frames(
                     )
                 touched_img_batch = touched_img_batch.to(device)
                 og_img_batch = og_img_batch.to(device)
-                preds, protos = model(
+
+                if _unsqueeze_sample:
+                    touched_img_batch = touched_img_batch.unsqueeze(0)
+                    og_img_batch = og_img_batch.unsqueeze(0)
+                preds = model(
                     touched_img_batch, 
                     combine_scales=True, 
                     to_img_scale=True, 
@@ -258,7 +261,6 @@ def evaluate_frames(
                 summary_df = post_process_preds(
                     og_img_batch, 
                     preds, 
-                    protos, 
                     num_classes=num_classes, 
                     colormap=colormap, 
                     vwriter=vwriter,
@@ -306,12 +308,12 @@ def run(args: argparse.Namespace, config_path: str):
     anchors = load_yaml(ANCHORS_PATH)["anchors"]
 
     state_dict = torch.load(args.weights_path, map_location=args.device)
-    model = SegmentationNetwork(
-        in_channels=3, 
+    model = DetectionNetwork(
+        in_channels=3,
         num_classes=state_dict["NUM_CLASSES"], 
         config=config, 
         anchors=anchors,
-        num_keypoints=config["num_keypoints"],
+        num_keypoints=config["num_keypoints"]
     )
     model.load_state_dict(state_dict["NETWORK_PARAMS"])
     model.eval()
@@ -344,7 +346,7 @@ def run(args: argparse.Namespace, config_path: str):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
-    best_model_path = f"saved_model/segmentation/best_model/{SegmentationNetwork.__name__}.pth.tar"
+    best_model_path = f"saved_model/detection/best_model/{DetectionNetwork.__name__}.pth.tar"
     config_path = os.path.join(Path(best_model_path).parent.resolve(), "config", "config.yaml")
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     parser = argparse.ArgumentParser(description="Segmentation Inference")
@@ -358,9 +360,9 @@ if __name__ == "__main__":
     parser.add_argument("--iou_threshold", type=float, default=0.35, metavar="", help="IOU threshold for NMS")
     parser.add_argument("--score_threshold", type=float, default=0.3, metavar="", help="Confidence score threshold")
     parser.add_argument("--with_summary", action="store_true", help="Store output with csv summary of detection")
-    parser.add_argument("--tracked_classes", type=str, default="1,4,7,16,17", metavar="", help="class indexes to track")
+    parser.add_argument("--tracked_classes", type=str, default="", metavar="", help="class indexes to track")
     parser.add_argument("--frame_skips", type=int, default=0, metavar="", help="Number of frames to skip (only applicable to video stream)")
     parser.add_argument("--box_allowance", type=int, default=4, metavar="", help="Bounding box width and height allowance")
     args = parser.parse_args()
-    # python inference_seg.py --path="test_vid/20241003T122001.mkv" --with_summary
+    # python inference_det.py --path="test_vid/20241003T122001.mkv" --with_summary
     run(args, config_path)

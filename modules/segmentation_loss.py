@@ -35,27 +35,36 @@ class SegmentationLoss(DetectionLoss):
         sm_anchors = self.model.sm_anchors.data.clone().detach()
         md_anchors = self.model.md_anchors.data.clone().detach()
         lg_anchors = self.model.lg_anchors.data.clone().detach()
-        (sm_lbox, sm_lconf, sm_lcls, sm_lseg), sm_metrics_dict = self.loss_fn(
+        sm_losses, sm_metrics_dict = self.loss_fn(
             sm_preds, targets, protos, target_masks, anchors=sm_anchors
         )
-        (md_lbox, md_lconf, md_lcls, md_lseg), md_metrics_dict = self.loss_fn(
+        md_losses, md_metrics_dict = self.loss_fn(
             md_preds, targets, protos, target_masks, anchors=md_anchors
         )
-        (lg_lbox, lg_lconf, lg_lcls, lg_lseg), lg_metrics_dict = self.loss_fn(
+        lg_losses, lg_metrics_dict = self.loss_fn(
             lg_preds, targets, protos, target_masks, anchors=lg_anchors
         )
+    
+        if len(sm_losses) == 4:
+            (sm_lbox, sm_lconf, sm_lcls, sm_lseg) = sm_losses
+            (md_lbox, md_lconf, md_lcls, md_lseg) = md_losses
+            (lg_lbox, lg_lconf, lg_lcls, lg_lseg) = lg_losses
+        else:
+            (sm_lbox, sm_lconf, sm_lcls, sm_lseg, sm_lkp) = sm_losses
+            (md_lbox, md_lconf, md_lcls, md_lseg, md_lkp) = md_losses
+            (lg_lbox, lg_lconf, lg_lcls, lg_lseg, lg_lkp) = lg_losses
+
         lbox = (self.scale_w[0] * sm_lbox) + (self.scale_w[1] * md_lbox) + (self.scale_w[2] * lg_lbox)
         lconf = (self.scale_w[0] * sm_lconf) + (self.scale_w[1] * md_lconf) + (self.scale_w[2] * lg_lconf)
         lcls = (self.scale_w[0] * sm_lcls) + (self.scale_w[1] * md_lcls) + (self.scale_w[2] * lg_lcls)
         lseg = (self.scale_w[0] * sm_lseg) + (self.scale_w[1] * md_lseg) + (self.scale_w[2] * lg_lseg)
+        loss = (self.box_w * lbox) + (self.conf_w * lconf) + (self.class_w * lcls) + (self.seg_w * lseg)
 
-        _b = preds[-1].shape[0] if self.batch_scale_loss else 1.0
-        loss = (
-            (self.box_w * lbox) + 
-            (self.conf_w * lconf) + 
-            (self.class_w * lcls) + 
-            (self.seg_w * lseg)
-        ) * _b
+        if len(sm_losses) > 4:
+            lkp = (self.scale_w[0] * sm_lkp) + (self.scale_w[1] * md_lkp) + (self.scale_w[2] * lg_lkp)
+            loss = loss + (self.keypoints_w * lkp)
+
+        loss = loss * (preds[-1].shape[0] if self.batch_scale_loss else 1.0)
         metrics_df = pd.DataFrame([sm_metrics_dict, md_metrics_dict, lg_metrics_dict])
         
         metrics_dict["aggregate_loss"] = loss.item()
@@ -71,10 +80,10 @@ class SegmentationLoss(DetectionLoss):
             protos: torch.Tensor,
             target_masks: torch.Tensor,
             anchors: Union[List[float], torch.Tensor],
-        ) -> Tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Dict[str, float]]:
+        ) -> Tuple[List[torch.Tensor], Dict[str, float]]:
         
         _device = preds.device
-        indices, t_classes, anchors, t_xywh, tmask_idx = DetectionDataset.build_target_by_scale(
+        indices, t_classes, anchors, t_xywh, tmask_idx, t_keypoints = DetectionDataset.build_target_by_scale(
             targets, 
             preds.shape[1:3],
             anchors,
@@ -87,9 +96,40 @@ class SegmentationLoss(DetectionLoss):
         match_preds = preds[batch_idx, grid_j, grid_i, anchor_idx]
         p_cls_proba = match_preds[:, 1:1+self.model.num_classes]
         p_xywh = match_preds[:, 1+self.model.num_classes:5+self.model.num_classes]
-        pmask_coefs = match_preds[:, 5+self.model.num_classes:]
+        k_i = 5+self.model.num_classes # begining slice index of mask_coefs
+        k_j = k_i + self.model.proto_seg_module.out_channels # end slice index of mask_coefs
+        pmask_coefs = match_preds[:, k_i:k_j]
+        p_keypoints = match_preds[:, k_j:]
         pxy, pwh = p_xywh.chunk(2, dim=-1)
         p_xywh = torch.cat([pxy, pwh*anchors], dim=-1)
+
+        kpv_loss = None
+        kpc_loss = None
+        kp_loss =  None
+        # t_keypoints: [x, y, v(visibility_class_index)]
+        # p_keypoints: [x, y, p_visible, p_occluded, p_deleted]
+        if torch.is_tensor(t_keypoints):
+            num_keypoints = self.model.num_keypoints
+            assert p_keypoints.shape[1] == num_keypoints*5 and t_keypoints.shape[1] == num_keypoints*3
+
+            # keypoints loss
+            if t_keypoints.shape[1] != 0:
+                p_keypoints = p_keypoints.reshape(*p_keypoints.shape[:-1], -1, 5)
+                t_keypoints = t_keypoints.reshape(*t_keypoints.shape[:-1], -1, 3)
+
+                # kpv = keypoint visibility
+                # kpc = keypoint coordinates
+                kpv_loss = self.kpv_lossfn(
+                    p_keypoints[..., 2:].flatten(start_dim=0, end_dim=-2), 
+                    t_keypoints[..., 2].flatten(start_dim=0, end_dim=-1).to(dtype=torch.int64, device=_device)
+                )
+                kpc_loss = nn.functional.mse_loss(p_keypoints[..., :2], t_keypoints[..., :2], reduction="none")
+                # remove invalid keypoints (keypoints with infinity or nan loss)
+                # samples with unequal number of keypoints or no keypoints at all 
+                # are padded with torch.inf or -torch.inf, so their losses will 
+                # either be NaN or (+/-)infinity
+                kpc_loss = kpc_loss[~(torch.isnan(kpc_loss) | torch.isinf(kpc_loss))].mean()
+                kp_loss = (1 + kpv_loss) * kpc_loss
 
         # bbox loss
         ciou = SegmentationLoss.compute_ciou(p_xywh, t_xywh)
@@ -145,7 +185,7 @@ class SegmentationLoss(DetectionLoss):
 
         # aggregate losses
         handle_nan = lambda val : val if val == val else torch.tensor(0.0, device=_device)
-        losses = (handle_nan(ciou_loss), conf_loss, handle_nan(class_loss), seg_loss)
+        losses = [handle_nan(ciou_loss), conf_loss, handle_nan(class_loss), seg_loss]
         metrics_dict = {}
         metrics_dict["mean_ciou"] = ciou.mean().item()
         metrics_dict["conf_loss"] = conf_loss.item()
@@ -158,6 +198,11 @@ class SegmentationLoss(DetectionLoss):
         metrics_dict["f1"] = f1
         metrics_dict["precision"] = precision
         metrics_dict["recall"] = recall
+        if torch.is_tensor(kp_loss):
+            losses.append(handle_nan(kp_loss))
+            metrics_dict["kpv_loss"] = kpv_loss.item()
+            metrics_dict["kpc_loss"] = kpc_loss.item()
+            metrics_dict["kp_loss"] = kp_loss.item()
         return losses, metrics_dict
 
 

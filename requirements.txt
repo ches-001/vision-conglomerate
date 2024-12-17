@@ -4,5 +4,4 @@ matplotlib==3.7.1
 kaggle==1.5.16
 python-dotenv==0.20.0
 roboflow==1.1.45
-deep-sort-realtime==1.3.2
-git+https://github.com/openai/CLIP.git
+supervision==0.24.0

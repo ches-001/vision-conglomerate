@@ -28,8 +28,19 @@ def make_dataloader(dataset: SegmentationDataset, batch_size: int, sampler: Opti
         kwargs["shuffle"] = False
     return DataLoader(dataset, collate_fn=SegmentationDataset.collate_fn, sampler=sampler, **kwargs)
 
-def make_model(in_channels: int, num_classes: int, config: Dict[str, Any], anchors: Dict[str, Any]) -> SegmentationNetwork:
-    model = SegmentationNetwork(in_channels=in_channels, num_classes=num_classes, config=config, anchors=anchors)
+def make_model(
+        in_channels: int, 
+        num_classes: int, 
+        config: Dict[str, Any], 
+        anchors: Dict[str, Any], 
+        num_keypoints: Optional[int]=None) -> SegmentationNetwork:
+    model = SegmentationNetwork(
+        in_channels=in_channels, 
+        num_classes=num_classes, 
+        config=config,
+        anchors=anchors,
+        num_keypoints=num_keypoints
+    )
     model.train()
     return model
 
@@ -125,7 +136,8 @@ def run(args: argparse.Namespace, config: Dict[str, Any]):
 
     new_anchors = {"sm": new_anchors[0], "md": new_anchors[1], "lg": new_anchors[2]}
     in_channels = train_dataset[0][0].shape[0]
-    model = make_model(in_channels, num_classes.item(), model_config, new_anchors)
+    num_keypoints = train_dataset[0][1][:, 6:].shape[1] // 3 # load a sample to get number of keypoints if available
+    model = make_model(in_channels, num_classes.item(), model_config, new_anchors, num_keypoints=num_keypoints)
     loss_fn = make_loss_fn(model, class_weights, overlap_masks=overlap_masks, **loss_config)
     optimizer = make_optimizer(model, **optimizer_config)
     lr_scheduler = make_lr_scheduler(optimizer, **lr_scheduler_config) if args.lr_schedule else None
@@ -136,7 +148,8 @@ def run(args: argparse.Namespace, config: Dict[str, Any]):
         lr_scheduler=lr_scheduler,
         lr_schedule_interval=args.lr_schedule_interval,
         device_or_rank=device_or_rank,
-        ddp_mode=args.use_ddp
+        ddp_mode=args.use_ddp,
+        config_path=CONFIG_PATH
     )
     best_loss = np.inf
     best_model_epoch = None

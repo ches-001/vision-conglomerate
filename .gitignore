@@ -6,6 +6,7 @@ saved_model
 **/__pycache__
 kaggle.json
 nb.ipynb
+nb2.ipynb
 test_txts
 test_vid
 .env

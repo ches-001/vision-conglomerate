@@ -6,6 +6,7 @@ from PIL import Image
 from typing import *
 from .detection_dataset import DetectionDataset
 from utils.utils import (
+    load_and_process_img,
     load_polygon_labels, 
     interpolate_polygons, 
     polygons_2_xywh, 
@@ -28,27 +29,24 @@ class SegmentationDataset(DetectionDataset):
         classes = np.asarray([p[0] for p in labels])
         polygons = interpolate_polygons([p[1:] for p in labels])
         bboxes = np.asarray(polygons_2_xywh(polygons))
-        img = Image.open(img_file).convert("RGB")
-        img = img.resize(self.img_wh)
-        img = np.asarray(img).copy()
+        img = load_and_process_img(img_file, img_wh=self.img_wh[::-1], permute=True, scale=True, convert_to="RGB")
         labels = np.zeros((len(polygons), 6), dtype=np.float32)
         if len(polygons) > 0:
             labels[:, 1] = classes
             labels[:, 2:] = bboxes
             if not self.overlap_masks:
                 masks = polygons_2_masks(
-                    polygons, img.shape[1], img.shape[0], scale_factor=self.mask_scale_factor
+                    polygons, img.shape[2], img.shape[1], scale_factor=self.mask_scale_factor
                 )
             else:
                 masks, sorted_indices = polygons_2_overlapped_mask(
-                    polygons, img.shape[1], img.shape[0], scale_factor=self.mask_scale_factor
+                    polygons, img.shape[2], img.shape[1], scale_factor=self.mask_scale_factor
                 )
                 labels = labels[sorted_indices]
         else:
-            mask_shape = np.asarray(tuple(img.shape[:2])) * self.mask_scale_factor
+            mask_shape = np.asarray(tuple(img.shape[1:])) * self.mask_scale_factor
             mask_shape = mask_shape.round().astype(int)
             masks = np.zeros(((1 if self.overlap_masks else 0), *mask_shape), dtype=np.uint8)
-        img = (torch.from_numpy(img).permute(2, 0, 1).contiguous() / 255).to(dtype=torch.float32)
         labels = torch.from_numpy(labels)
         masks = torch.from_numpy(masks)
         return img, labels, masks

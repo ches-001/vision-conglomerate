@@ -47,6 +47,7 @@ model_config:
     reg_fmap_depth: 1
     cls_fmap_depth: 1
     masks_fmap_depth: 1
+    keypoints_fmap_depth: 1
 
   basichead_config:
     width_multiple: 0.5
@@ -83,9 +84,11 @@ train_config:
     class_w: 0.3
     conf_w: 1.0
     seg_w: 1.0
+    keypoints_w: 0.3
     edge_t: 0.5
     gamma: null
     label_smoothing: 0.001
+    scale_w: [5.0, 2.0, 1.0]
 
   optimizer_config:
     betas: [0.9, 0.999]

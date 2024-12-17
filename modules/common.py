@@ -329,11 +329,12 @@ class CSPSPPFModule(nn.Module):
 class ProtoSegModule(nn.Module):
     def __init__(self, in_channels: int, out_channels: int=32, c_h: int=256, upsample_mode: str="nearest"):
         super(ProtoSegModule, self).__init__()
-
-        self.conv1 = ConvBNorm(in_channels, c_h, kernel_size=3, activation=nn.ReLU)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.conv1 = ConvBNorm(self.in_channels, c_h, kernel_size=3, activation=nn.ReLU)
         self.upsample = nn.Upsample(scale_factor=2, mode=upsample_mode)
         self.conv2 = ConvBNorm(c_h, c_h, kernel_size=3, activation=nn.ReLU)
-        self.conv3 = ConvBNorm(c_h, out_channels, kernel_size=1, activation=nn.ReLU)
+        self.conv3 = ConvBNorm(c_h, self.out_channels, kernel_size=1, activation=nn.ReLU)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.conv1(x)
@@ -491,34 +492,50 @@ class EffiDeHead(nn.Module):
             num_classes: int, 
             num_anchors: int=3,
             num_masks: Optional[int]=None,
+            num_keypoints: Optional[int]=None,
             width_multiple: float=1.0,
             reg_fmap_depth: int=1, 
             cls_fmap_depth: int=1,
             masks_fmap_depth: Optional[int]=None,
+            keypoints_fmap_depth: Optional[int]=None
         ):
         super(EffiDeHead, self).__init__()
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.num_anchors = num_anchors
+        self.num_masks = num_masks
+        self.num_keypoints = num_keypoints
         stem_out_channels = max(round(in_channels*width_multiple), 1)
         reg_fmap_depth = max(round(reg_fmap_depth), 1)
         cls_fmap_depth = max(round(cls_fmap_depth), 1)
         self.stem_layer = ConvBNorm(in_channels, stem_out_channels, kernel_size=3, stride=1)
+
+        _fmap_layer = lambda : ConvBNorm(stem_out_channels, stem_out_channels, 3, 1)
+
         self.regression_fmap_layer = nn.Sequential(
-            *[ConvBNorm(stem_out_channels, stem_out_channels, kernel_size=3, stride=1) for _ in range(0, reg_fmap_depth+1)]
+            *[_fmap_layer() for _ in range(0, reg_fmap_depth+1)]
         )
         self.classification_fmap_layer = nn.Sequential(
-            *[ConvBNorm(stem_out_channels, stem_out_channels, kernel_size=3, stride=1) for _ in range(0, cls_fmap_depth)]
+            *[_fmap_layer() for _ in range(0, cls_fmap_depth)]
         )
         self.conf_layer = nn.Conv2d(stem_out_channels, num_anchors, kernel_size=1)
         self.cls_layer = nn.Conv2d(stem_out_channels, num_anchors * num_classes, kernel_size=1)
         self.bbox_layer = nn.Conv2d(stem_out_channels, num_anchors * 4, kernel_size=1)
+
         if num_masks:
             masks_fmap_depth = max(round(masks_fmap_depth or 1), 1)
             self.mask_fmap_layer = nn.Sequential(
-                *[ConvBNorm(stem_out_channels, stem_out_channels, kernel_size=3, stride=1) for _ in range(0, masks_fmap_depth)]
+                *[_fmap_layer() for _ in range(0, masks_fmap_depth)]
             )
             self.masks_layer = nn.Conv2d(stem_out_channels, num_anchors * num_masks, kernel_size=1)
+
+        if num_keypoints:
+            keypoints_fmap_depth = max(round(keypoints_fmap_depth or 1), 1)
+            self.keypoints_fmap_layer = nn.Sequential(
+                *[_fmap_layer() for _ in range(0, keypoints_fmap_depth)]
+            )
+            # multiply num_keypoints by 3 because each keypoint comprises [x, y, visible, occluded, deleted]
+            self.keypoints_layer = nn.Conv2d(stem_out_channels, num_anchors*5*num_keypoints, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, _, ny, nx = x.shape
@@ -526,18 +543,26 @@ class EffiDeHead(nn.Module):
         conf = self.conf_layer(self.regression_fmap_layer(stem))
         bbox = self.bbox_layer(self.regression_fmap_layer(stem))
         cls = self.cls_layer(self.classification_fmap_layer(stem))
-        masks = None
+
+        _permute_resize = lambda x, last_dim : (
+            x.permute(0, 2, 3, 1)
+            .reshape(batch_size, ny, nx, self.num_anchors, last_dim)
+        )
+        conf = _permute_resize(conf, 1)
+        cls = _permute_resize(cls, self.num_classes)
+        bbox = _permute_resize(bbox, 4)
+        output = torch.cat([conf, cls, bbox], dim=-1)
+
         if hasattr(self, "masks_layer"):
             masks = self.masks_layer(self.mask_fmap_layer(stem))
-        conf = conf.permute(0, 2, 3, 1).reshape(batch_size, ny, nx, self.num_anchors, 1)
-        cls = cls.permute(0, 2, 3, 1).reshape(batch_size, ny, nx, self.num_anchors, self.num_classes)
-        bbox = bbox.permute(0, 2, 3, 1).reshape(batch_size, ny, nx, self.num_anchors, 4)
-        if not torch.is_tensor(masks):
-            output = torch.cat([conf, cls, bbox], dim=-1)
-        else:
-            masks = masks.permute(0, 2, 3, 1).reshape(batch_size, ny, nx, self.num_anchors, -1)
-            output = torch.cat([conf, cls, bbox, masks], dim=-1)
-        # shape: [batch_size, ny, nx, num_anchors, 5+(num_classes+(num_masks or 0))]
+            masks =_permute_resize(masks, self.num_masks)
+            output = torch.cat([output, masks], dim=-1)
+            
+        if hasattr(self, "keypoints_layer"):
+            keypoints = self.keypoints_layer(self.keypoints_fmap_layer(stem))
+            keypoints = _permute_resize(keypoints, 5*self.num_keypoints)
+            output = torch.cat([output, keypoints], dim=-1)
+        # shape: [batch_size, ny, nx, num_anchors, (1 + num_classes + 4 + num_masks + (5*num_keypoints))]
         return output
     
 
@@ -545,20 +570,25 @@ class BasicHead(nn.Module):
     def __init__(
             self, 
             in_channels: int,
-            num_classes: int, 
+            num_classes: int,
             num_anchors: int=3,
             num_masks: Optional[int]=None,
+            num_keypoints: Optional[int]=None,
             width_multiple: float=1.0
         ):
         super(BasicHead, self).__init__()
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.num_anchors = num_anchors
+        self.num_masks = num_masks
+        self.num_keypoints = num_keypoints
         stem_out_channels = max(round(in_channels*width_multiple), 1)
         self.stem_layer = ConvBNorm(in_channels, stem_out_channels, kernel_size=3, stride=1)
+        # multiply num keypoints by 3 because each keypoint comprises [x, y, visible, occluded, deleted]
+        out_channels = num_anchors * (5 + self.num_classes + (self.num_masks or 0) + (self.num_keypoints or 0)*5)
         self.conv = nn.Conv2d(
             stem_out_channels, 
-            out_channels=(num_anchors * (5 + self.num_classes + (num_masks or 0))), 
+            out_channels=out_channels, 
             kernel_size=1
         )
 
@@ -567,5 +597,5 @@ class BasicHead(nn.Module):
         output = self.stem_layer(x)
         output = self.conv(output)
         output = output.permute(0, 2, 3, 1).reshape(batch_size, ny, nx, self.num_anchors, -1)
-        # shape: [batch_size, ny, nx, num_anchors, 5+num_classes+(num_mask or 0)]
+        # shape: [batch_size, ny, nx, num_anchors, (1 + num_classes + 4 + num_masks + (5*num_keypoints))]
         return output

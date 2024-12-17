@@ -66,7 +66,7 @@ def cluster_anchors_w_mutation(
         # kmeans may return fewer points than requested if wh is insufficient or too similar
         assert num_anchors == solution.shape[0]
     except AssertionError:
-        solution = torch.sort(torch.rand(num_anchors, 2))
+        solution = torch.sort(torch.rand(num_anchors, 2)).values
     log_generation(solution)
 
     best_score = ratio_metrics(solution, wh_data, threshold)

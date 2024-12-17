@@ -13,15 +13,6 @@ class SegmentationNetwork(DetectionNetwork):
             self.config["num_masks"], 
             **self.config["protos_config"]
         )
-        self.head = nn.ModuleList([
-            getattr(common, self.config["head"])(
-                ch, 
-                num_classes=self.num_classes, 
-                num_anchors=self.num_anchors, 
-                num_masks=self.config["num_masks"],
-                **self.config.get(self.config["head"].lower()+"_config", {})
-            )for ch in self.neck.neck_out_channels
-        ])
 
     def forward(self, *args, **kwargs) -> Tuple[
         Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],

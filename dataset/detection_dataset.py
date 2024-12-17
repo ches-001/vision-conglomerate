@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 from typing import *
-from utils.utils import load_bbox_labels
+from utils.utils import load_bbox_labels, load_and_process_img
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +35,10 @@ class DetectionDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         img_file = self.img_files[idx]
         annotation_file = self.annotation_files[idx]
-        boxes = load_bbox_labels(annotation_file)
-        img = Image.open(img_file).convert("RGB")
-        img = img.resize(self.img_wh)
-        img = np.asarray(img).copy()
-        img = torch.from_numpy(img).permute(2, 0, 1)
-        img = (img / 255).to(dtype=torch.float32)
-
-        labels = torch.zeros((boxes.shape[0], 6), dtype=torch.float32)
+        # bbox_only set to False, incase keypoint annotations exists
+        boxes = load_bbox_labels(annotation_file, bbox_only=False)
+        img = load_and_process_img(img_file, img_wh=self.img_wh[::-1], permute=True, scale=True, convert_to="RGB")
+        labels = torch.zeros((boxes.shape[0], boxes.shape[1]+1), dtype=torch.float32)
         if labels.shape[0] > 0:
             labels[:, 1:] = torch.from_numpy(boxes).to(dtype=torch.float32)
         return img, labels
@@ -87,9 +83,22 @@ class DetectionDataset(Dataset):
             edge_threshold: float=0.5,
             overlap_masks: Optional[bool]=None,
             batch_size: Optional[int]=None,
-        ) -> Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        # targets contains (batch_idx, cls, x, y, w, h)
-        # targets shape: (num_boxes across the batch, 6)
+        ) -> Tuple[
+            List[torch.Tensor], 
+            torch.Tensor, 
+            torch.Tensor, 
+            torch.Tensor, 
+            Optional[torch.Tensor], 
+            Optional[torch.Tensor]
+        ]:
+        # NOTE: I apologize if the comments here are excessive, I basically reimplemented the target builder of the
+        # official YOLOv5 implementation with extra stuff (like taking keypoints and segment mask indexes into account). 
+        # I made these comments to help me follow through after I had understood what was going on and also incase anyone
+        # view this and wonder whatever the hell is actually going on here.
+
+        # targets contains (batch_idx, cls, x, y, w, h) or (batch_idx, cls, x, y, w, h, x1, y1, v1, x2, y2, v2,...)
+        # where x1, y1, v1, x2, y2, v2,... are keypoint coordinates and visibility (visible, occluded or deleted)
+        # targets shape: (num_boxes across the batch, 6) or (num_boxes across the batch, 6 + (3*num_keypoints))
         _device = targets.device
         _dtype = targets.dtype
         if not isinstance(fmap_shape, torch.Tensor):
@@ -102,10 +111,11 @@ class DetectionDataset(Dataset):
         num_anchors = anchors.shape[0]
         num_targets = targets.shape[0]
         anchor_idx = torch.arange(num_anchors, device=_device).unsqueeze(dim=-1).tile(1, num_targets)
+        _t = targets.unsqueeze(dim=0).tile(num_anchors, 1, 1)
         if overlap_masks is None:
             # normalized to gridspace gain
             gain = torch.ones(7, device=_device)
-            targets = torch.cat([targets.unsqueeze(dim=0).tile(num_anchors, 1, 1), anchor_idx[..., None]], dim=-1)
+            targets = torch.cat([_t[..., :6], anchor_idx[..., None], _t[..., 6:]], dim=-1)
         else:
             gain = torch.ones(8, device=_device)
             # NOTE: The collate_fn discussed in this else block is implemented in the SegmentationDataset class
@@ -143,9 +153,16 @@ class DetectionDataset(Dataset):
                 # one-to-one correspondence, hence no need for any fancy loops to extract the number of target bboxes
                 # per mask, because we know that for 4 boxes, there are 4 masks.
                 tmask_idx = torch.arange(targets.shape[0], device=_device).unsqueeze(dim=0).tile(num_anchors, 1)
+
             targets = torch.cat(
-                [targets.unsqueeze(dim=0).tile(num_anchors, 1, 1), anchor_idx[..., None], tmask_idx[..., None]], dim=-1
+                [_t[..., :6], anchor_idx[..., None], tmask_idx[..., None], _t[..., 6:]], dim=-1
             )
+        
+        # pad gain tensor if need be (if keypoint annotations are available anyways)
+        gain_pad_size = _t[..., 6:].shape[-1]
+        if gain_pad_size > 0:
+            gain = torch.cat([gain, torch.ones(gain_pad_size, device=_device)], dim=0)
+
         gain[2:6] = fmap_shape[[1, 0, 1, 0]]
         # anchors are originally normalized relative to image size, so they range from 0 to 1
         # here we scale these anchors to the dimensions of the feature map to compare with the
@@ -192,6 +209,7 @@ class DetectionDataset(Dataset):
         else:
             targets = targets[0]
             offset = 0
+        kp_i = 7 # starting index of keypoint coordinates
         batch_idx = targets[:, 0].long()
         classes = targets[:, 1].long()
         grid_xy = targets[:, 2:4]
@@ -206,5 +224,10 @@ class DetectionDataset(Dataset):
         boxes = torch.cat((grid_xy - grid_ij, grid_wh), dim=1)
         tmask_idx = None
         if overlap_masks is not None:
+            kp_i += 1
             tmask_idx = targets[:, 7].long()
-        return indices, classes, anchors, boxes, tmask_idx
+        
+        keypoints = targets[:, kp_i:]
+        if keypoints.shape[1] == 0:
+            keypoints = None
+        return indices, classes, anchors, boxes, tmask_idx, keypoints

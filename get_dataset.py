@@ -6,14 +6,16 @@ import shutil
 import kaggle
 from dotenv import load_dotenv
 from roboflow import Roboflow
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 class KagglePadelBallDataDownloader:
-    def __init__(self):
+    def __init__(self, dtype: Optional[str]=None):
         os.environ["KAGGLE_CONFIG_DIR"] = os.getcwd()
         self.dataset_url = "https://www.kaggle.com/datasets/ichimarugin/padel-ball-dataset"
-        self.dataset_dir = "data/detection"
+        __default_dtype = "detection"
+        self.dataset_dir = f"data/{dtype or __default_dtype}"
 
     def download(self):
         dataset_url = self.dataset_url
@@ -37,14 +39,15 @@ class KagglePadelBallDataDownloader:
 
 
 class RoboFlowDataDownloader:
-    def __init__(self, api_key: str, workspace: str, project_id: str, version: int):
+    def __init__(self, api_key: str, workspace: str, project_id: str, version: int, dtype: Optional[str]=None):
         self.version = version
         self.dformat = "yolov5"
         self.rf = Roboflow(api_key=api_key)
         self.workspace = self.rf.workspace(the_workspace=workspace)
         self.project = self.workspace.project(project_id=project_id)
         self.version = self.project.version(version_number=version)
-        self.dataset_dir = "data/segmentation"
+        __default_dtype = "segmentation"
+        self.dataset_dir = f"data/{dtype or __default_dtype}"
 
     def download(self):
         self.version.download(self.dformat, location=self.dataset_dir, overwrite=True)
@@ -60,7 +63,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description=f"Dataset Downloader")
     parser.add_argument(
-        "--source", type=str, choices=["kaggle", "roboflow"], default=download_source, metavar="", help=f"Dataset download source"
+        "--source", type=str, choices=["kaggle", "roboflow"], 
+        default=download_source, metavar="", help=f"Dataset download source"
+    )
+    parser.add_argument(
+        "--dtype", type=str, default="", choices=["detection", "segmentation"],
+        metavar="", help=f"Dataset type (detection or segmentation)"
     )
     parser.add_argument(
         "--rf_api_key", type=str, default=rf_api_key, metavar="", help=f"Roboflow API key"
@@ -77,9 +85,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.source == "kaggle":
-        dataset_downloader = KagglePadelBallDataDownloader()
+        dataset_downloader = KagglePadelBallDataDownloader(dtype=args.dtype)
     elif args.source == "roboflow":
         dataset_downloader = RoboFlowDataDownloader(
-            args.rf_api_key, args.rf_workplace, args.rf_project_id, args.rf_version
+            args.rf_api_key, args.rf_workplace, args.rf_project_id, args.rf_version, dtype=args.dtype
         )
     dataset_downloader.download()

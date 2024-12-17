@@ -7,7 +7,8 @@ import torch
 import numpy as np
 import torch.nn as nn
 import pandas as pd
-from deep_sort_realtime.deep_sort.track import Track
+from PIL import Image
+from supervision import Detections
 from typing import *
 
 def load_yaml(config_path: str) -> Dict[str, Dict[str, List[List[float]]]]:
@@ -21,12 +22,32 @@ def load_model(model: nn.Module, path: str, device: str="cpu", eval: bool=True):
     model.load_state_dict(torch.load(path, map_location=device)["NETWORK_PARAMS"])
     model.eval() if eval else model.train()
 
+def load_and_process_img(
+        img_path: str, 
+        img_wh: Optional[Tuple[int, int]]=None, 
+        permute: bool=True, 
+        scale: bool=True,
+        convert_to: str="RGB"
+    ) -> torch.Tensor:
+    img = Image.open(img_path).convert(convert_to)
+    if img_wh is not None:
+        img = img.resize(img_wh)
+    img = np.asarray(img).copy()
+    img = torch.from_numpy(img)
+    if permute:
+        img = img.permute(2, 0, 1)
+    if scale:
+        img = (img / 255).to(dtype=torch.float32)
+    return img
 
-def load_bbox_labels(annotation_file: str) -> np.ndarray:
+
+def load_bbox_labels(annotation_file: str, bbox_only: bool=True) -> np.ndarray:
     with open(annotation_file, "r") as f:
         text = f.read()
         lines = text.split("\n")
         boxes = np.asarray([line.split() for line in lines if len(line.split()) > 0]).astype(np.float32)
+        if bbox_only:
+            boxes = boxes[:, :5]
     f.close()
     return boxes
 
@@ -191,16 +212,30 @@ def get_box_sizes_and_class_weights_from_polygons(path: str) -> Tuple[np.ndarray
     return box_sizes, get_class_weights(classes)
 
 
-def xywh2x1y1x2y2(bboxes: torch.Tensor) -> torch.Tensor:
-    bboxes = torch.cat(
-        [bboxes[..., :2]-(bboxes[..., 2:]/2), bboxes[..., :2]+(bboxes[..., 2:]/2)], 
-    dim=-1)
+def xywh2x1y1x2y2(bboxes: Union[np.ndarray, torch.Tensor]) -> Union[np.ndarray, torch.Tensor]:
+    # convert xywh -> xyxy
+    # this implementation could be done inplace, and made easier, but I need this to
+    # always return a new tensor at a new memory address
+    assert isinstance(bboxes, (np.ndarray, torch.Tensor))
+    x1y1 = bboxes[..., :2] - (bboxes[..., 2:] / 2)
+    x2y2 = x1y1 + bboxes[..., 2:]
+    if isinstance(bboxes, torch.Tensor):
+        bboxes = torch.cat([x1y1, x2y2], dim=-1)
+    else:
+        bboxes = np.concatenate([x1y1, x2y2], axis=-1)
     return bboxes
 
-def x1y1x2y22xywh(bboxes: torch.Tensor) -> torch.Tensor:
-    bboxes = torch.cat(
-        [(bboxes[..., :2]-(bboxes[..., 2:])/2), bboxes[..., :2]-(bboxes[..., 2:])], 
-    dim=-1)
+def x1y1x2y22xywh(bboxes: Union[np.ndarray, torch.Tensor]) -> Union[np.ndarray, torch.Tensor]:
+    # convert xyxy -> xywh
+    # this implementation could be done inplace, and made easier, but I need this to
+    # always return a new tensor at a new memory address
+    assert isinstance(bboxes, (np.ndarray, torch.Tensor))
+    wh = bboxes[..., 2:] - bboxes[..., :2]
+    xy = bboxes[..., :2] + (wh / 2)
+    if isinstance(bboxes, torch.Tensor):
+        bboxes = torch.cat([xy, wh], dim=-1)
+    else:
+        bboxes = np.concatenate([xy, wh], axis=-1)
     return bboxes
 
 def apply_segments(
@@ -212,6 +247,7 @@ def apply_segments(
     # img shape: (C, H, W)
     # masks: (1 or m, H, W)
     assert img.ndim == 3 and masks.ndim == 3
+    assert img.dtype in [np.uint8, np.float32, float]
     if img.shape[0] == 3:
         img = np.ascontiguousarray(img.transpose(1, 2, 0), dtype=img.dtype)
     if img.dtype != np.uint8:
@@ -244,6 +280,7 @@ def apply_bboxes(
     # img shape: (C, H, W)
     # bboxes: (n, 6): format -> (score, class_idx, x1, y1, x2, y2)
     assert img.ndim == 3 and bboxes.ndim == 2 and bboxes.shape[1] == 6
+    assert img.dtype in [np.uint8, np.float32, float]
     if img.shape[0] == 3:
         img = np.ascontiguousarray(img.transpose(1, 2, 0), dtype=img.dtype)
     if img.dtype != np.uint8:
@@ -251,7 +288,7 @@ def apply_bboxes(
     
     if colormap is None:
         colormap = np.random.randint(0, 255, size=(int(bboxes[:, 1].max()), 3))
-    for _, box in enumerate(bboxes):
+    for box in bboxes:
         score, class_idx, x1, y1, x2, y2 = box
         class_idx = int(class_idx)
         x1, y1, x2, y2 = list(map(lambda x : round(x), [x1, y1, x2, y2]))
@@ -272,9 +309,30 @@ def apply_bboxes(
         )
     return img
 
+def apply_keypoints(img: np.ndarray, keypoints: np.ndarray) -> np.ndarray:
+    assert img.ndim == 3
+    assert img.dtype in [np.uint8, np.float32, float]
+    if img.shape[0] == 3:
+        img = np.ascontiguousarray(img.transpose(1, 2, 0), dtype=img.dtype)
+    if img.dtype != np.uint8:
+        img = (img * 255).astype(np.uint8)
+    keypoints = keypoints.astype(int)
+
+    for i in range(keypoints.shape[0]):
+        if keypoints[i][2] == 0:
+            # visible keypoint
+            color = (255, 255, 255)
+        elif keypoints[i][2] == 1:
+            # occluded keypoint 
+            color = (255, 255, 100)
+        else:
+            continue
+        img = cv2.circle(img, keypoints[i][:2], 3, color=color, thickness=-1)
+    return img
+
 def apply_bboxes_from_tracks(
         img: np.ndarray, 
-        tracks: List[Track], 
+        detections: Detections, 
         box_thickness: int=2,
         text_thickness: int=2, 
         font: int=cv2.FONT_HERSHEY_SIMPLEX,
@@ -283,6 +341,7 @@ def apply_bboxes_from_tracks(
         classmap: Optional[List[Dict[str, Any]]]=None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     # img shape: (C, H, W)
+    assert img.ndim == 3 and img.dtype in [np.uint8, np.float32, float]
     if img.shape[0] == 3:
         img = np.ascontiguousarray(img.transpose(1, 2, 0), dtype=img.dtype)
     if img.dtype != np.uint8:
@@ -291,16 +350,14 @@ def apply_bboxes_from_tracks(
     # if colormap is None: TODO
     #   colormap = np.random.randint(0, 255, size=(int(bboxes[:, 1].max()), 3))
     boxes = []
-    for _, track in enumerate(tracks):
-        # if not track.is_confirmed():
-        #     continue
-        track_id = track.track_id
-        class_idx = track.det_class
-        score = track.det_conf
+    for i in range(0, len(detections)):
+        track_id = detections.tracker_id[i]
+        class_idx = int(detections.class_id[i])
+        score = detections.confidence[i]
         if score is None:
             continue
-        x1, y1, x2, y2 = track.to_ltrb()
-        boxes.append([score, class_idx, x1, y1, x2, y2])
+        x1, y1, x2, y2 = detections.xyxy[i]
+        boxes.append([int(track_id), score, class_idx, x1, y1, x2, y2])
         x1, y1, x2, y2 = list(map(lambda x : round(x), [x1, y1, x2, y2]))
         color = tuple(colormap[int(class_idx)].tolist())
         img = cv2.rectangle(img, pt1=(x1, y1), pt2=(x2, y2), color=color, thickness=box_thickness)
@@ -322,36 +379,23 @@ def apply_bboxes_from_tracks(
 
 def detection_summary_df(
         bboxes: np.ndarray, 
-        img_wh: Optional[Union[int, Tuple[int]]]=None,
-        og_img_wh: Optional[Union[int, Tuple[int]]]=None,
-        classmap: Optional[List[Dict[str, Any]]]=None
+        classmap: Optional[List[Dict[str, Any]]]=None,
+        box_coord_label: Optional[List[str]]=None
     ) -> Optional[pd.DataFrame]:
     data = []
-
+    box_coord_label = box_coord_label or ["X", "Y", "W", "H"]
     bboxes = bboxes.copy()
-    if og_img_wh is not None:
-        if isinstance(img_wh, int):
-            og_img_wh = (og_img_wh, og_img_wh)
-        if img_wh is None:
-            raise ValueError(
-                "Providing og_img_wh implies that you wish to rescale the bboxes x1,y1,x2,y2 "
-                "values to the og_img scale, as such you will need to provide the img_wh corresponding"
-                "to the current img scale you're rescaling from"
-            )
-        if isinstance(img_wh, int):
-            img_wh = (img_wh, img_wh)
-        w, h = img_wh
-        og_w, og_h = og_img_wh
-        bboxes[:, 2], bboxes[:, 4] = (bboxes[:, 2] / w) * og_w, (bboxes[:, 4] / w) * og_w 
-        bboxes[:, 3], bboxes[:, 5] = (bboxes[:, 3] / h) * og_h, (bboxes[:, 5] / h) * og_h 
-
-    for _, box in enumerate(bboxes):
-        score, class_idx, x1, y1, x2, y2 = box
+    for box in bboxes:
+        row = {}
+        if len(box) == 6:
+            score, class_idx, x_or_x1, y_or_y1, x2_or_w, y2_or_h = box
+        else:
+            track_id, score, class_idx, x_or_x1, y_or_y1, x2_or_w, y2_or_h = box
+            row["track_id"] = track_id
         class_idx =  int(class_idx)
-        x, y = (x2 - x1) / 2, (y2 - y1) / 2
-        x += x1
-        y += y1
         class_ = classmap[class_idx]["name"] if classmap else class_idx
-        data.append({"confidence": score, "class": class_, "X": int(x), "Y": int(y)})
+        row.update({"confidence": score, "class": class_})
+        row.update({k:int(v) for k, v in zip(box_coord_label, [x_or_x1, y_or_y1, x2_or_w, y2_or_h])})
+        data.append(row)
     if len(data) > 0:
         return pd.DataFrame(data)

@@ -1,4 +1,6 @@
 import os
+import shutil
+import yaml
 import time
 import tqdm
 import math
@@ -31,7 +33,8 @@ class TrainDetectionPipeline:
         model_name: Optional[str]=None,
         checkpoint_path: Optional[str]=None,
         device_or_rank: Union[int, str]="cpu",
-        ddp_mode: bool=False
+        ddp_mode: bool=False,
+        config_path: Optional[str]=None
     ):
         logger.info(f"Number of model paramters: {sum([i.numel() for i in model.parameters()])}")
         self.model = model
@@ -48,6 +51,9 @@ class TrainDetectionPipeline:
             self.model = DDP(self.model, device_ids=[self.device_or_rank, ])
             logger.info(f"Model copied to device: {self.device_or_rank} for distributed training")
         self.checkpoints_dir = os.path.join(self.checkpoints_dir, str(int(time.time())))
+
+        self._save_config_copy(config_path, to_checkpoint_dir=True) # save config to checkpoint_dir
+        self._save_config_copy(config_path, to_checkpoint_dir=False) # save config to best_model_dir
 
         # collect metrics in this list of dicts
         self._train_metrics: List[Dict[str, float]] = []
@@ -81,12 +87,26 @@ class TrainDetectionPipeline:
             }
         return torch.save(state_dicts, path)
     
+    def _save_config_copy(self, config_path: str, to_checkpoint_dir: bool):
+        if not (self.ddp_mode) or (self.ddp_mode and self.device_or_rank in [0, "cuda:0"]):
+            dest_path = os.path.join(
+                (self.checkpoints_dir if to_checkpoint_dir else self.best_model_dir), "config"
+            )
+            with open(config_path, "r") as f:
+                config = yaml.safe_load(f)
+            f.close()
+            config["model_config"]["num_keypoints"] = self.model.num_keypoints
+            os.makedirs(dest_path, exist_ok=True)
+            with open(os.path.join(dest_path, "config.yaml"), "w") as f:
+                yaml.safe_dump(config, f, sort_keys=False, default_flow_style=True)
+            f.close()
+
     def save_best_model(self):
         # If DDP mode, we only need to ensure that the model is only being saved at
         # rank-0 device. It does not neccessarily matter the rank, as long as the
         # model saving only happens on one rank only (one device) since the model
         # is exactly the same across all
-        if (not self.ddp_mode) or (self.ddp_mode and self.device_or_rank in [0, f"cuda:0"]):
+        if (not self.ddp_mode) or (self.ddp_mode and self.device_or_rank in [0, "cuda:0"]):
             if not os.path.isdir(self.best_model_dir): 
                 os.makedirs(self.best_model_dir, exist_ok=True)
             path = os.path.join(self.best_model_dir, f"{self.model_name}.pth.tar")
@@ -95,7 +115,7 @@ class TrainDetectionPipeline:
     def save_checkpoint(self):
         # similar to the `save_best_model` method, the model for only one device needs
         # to be saved.
-        if (not self.ddp_mode) or (self.ddp_mode and self.device_or_rank in [0, f"cuda:0"]):
+        if (not self.ddp_mode) or (self.ddp_mode and self.device_or_rank in [0, "cuda:0"]):
             if not os.path.isdir(self.checkpoints_dir): 
                 os.makedirs(self.checkpoints_dir, exist_ok=True)
             time = str(datetime.now())
