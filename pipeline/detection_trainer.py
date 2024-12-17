@@ -1,5 +1,4 @@
 import os
-import shutil
 import yaml
 import time
 import tqdm
