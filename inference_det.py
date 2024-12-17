@@ -217,26 +217,11 @@ def evaluate_frames(
             if isinstance(dataset, IterableDataset):
                 if num_workers > 0:
                     logger.warning("num workers will be set to 0 when processing video")
-                    num_workers = 0
-
-                if batch_size > 1:
-                    logger.warning("batch size will be set to 1 when processing video")
-                    batch_size = 1
-
-                _iter = dataset
-                _unsqueeze_sample = True
-            else:
-                _iter = DataLoader(
-                    dataset, 
-                    batch_size=batch_size, 
-                    shuffle=False, 
-                    num_workers=num_workers
-                )
-                _unsqueeze_sample = False
-                
+                    num_workers = 0                
+            dataset = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
             vwriter = None
             start_idx = 0
-            for i, (touched_img_batch, og_img_batch) in tqdm.tqdm(enumerate(_iter)):
+            for i, (touched_img_batch, og_img_batch) in tqdm.tqdm(enumerate(dataset)):
                 if is_video and (vwriter is None):
                     w, h = og_img_batch.shape[-1], og_img_batch.shape[-2]
                     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -248,10 +233,6 @@ def evaluate_frames(
                     )
                 touched_img_batch = touched_img_batch.to(device)
                 og_img_batch = og_img_batch.to(device)
-
-                if _unsqueeze_sample:
-                    touched_img_batch = touched_img_batch.unsqueeze(0)
-                    og_img_batch = og_img_batch.unsqueeze(0)
                 preds = model(
                     touched_img_batch, 
                     combine_scales=True, 
