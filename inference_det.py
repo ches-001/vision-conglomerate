@@ -8,13 +8,12 @@ import logging
 import torch
 import numpy as np
 import pandas as pd
-import torch.nn.functional as F
 import torchvision
 import supervision as sv
 from pathlib import Path
 from PIL import Image
 from datetime import datetime
-from torch.utils.data import Dataset, IterableDataset, DataLoader
+from torch.utils.data import IterableDataset, DataLoader
 from dataset.inference_dataset import SingleImgSample, InferenceImgDataset, InferenceVideoDataset
 from modules.detection import DetectionNet
 from utils.utils import(

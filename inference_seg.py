@@ -14,7 +14,7 @@ import supervision as sv
 from pathlib import Path
 from PIL import Image
 from datetime import datetime
-from torch.utils.data import IterableDataset, Dataset, DataLoader
+from torch.utils.data import IterableDataset, DataLoader
 from dataset.inference_dataset import SingleImgSample, InferenceImgDataset, InferenceVideoDataset
 from modules.segmentation import SegmentationNet
 from utils.utils import(
