@@ -14,9 +14,9 @@ import supervision as sv
 from pathlib import Path
 from PIL import Image
 from datetime import datetime
-from torch.utils.data import Dataset, IterableDataset, DataLoader
+from torch.utils.data import IterableDataset, Dataset, DataLoader
 from dataset.inference_dataset import SingleImgSample, InferenceImgDataset, InferenceVideoDataset
-from modules.segmentation import SegmentationNetwork
+from modules.segmentation import SegmentationNet
 from utils.utils import(
     load_yaml, 
     xywh2x1y1x2y2,
@@ -29,9 +29,9 @@ from utils.utils import(
 )
 from typing import *
 
+
 STORAGE_PATH = os.path.join("outputs", "segmentation", str(datetime.now()).replace(":", "_"))
 CLASS_MAP_PATH = os.path.join("classmap", "segmentation", "classmap.json")
-ANCHORS_PATH = os.path.join("config", "segmentation", "anchors.yaml")
 LOG_FORMAT="%(asctime)s %(levelname)s %(filename)s: %(message)s"
 LOG_DATE_FORMAT="%Y-%m-%d %H:%M:%S"
 
@@ -183,8 +183,8 @@ def post_process_preds(
 
 
 def evaluate_frames(
-        dataset: Union[SingleImgSample, Dataset, IterableDataset],
-        model: SegmentationNetwork, 
+        dataset: Union[SingleImgSample, InferenceImgDataset, InferenceVideoDataset],
+        model: SegmentationNet, 
         batch_size: int=32,
         num_workers: int=0,
         device: Union[int, str]="cpu",
@@ -192,10 +192,10 @@ def evaluate_frames(
         fps: int=30,
         **kwargs
     ):
-    if not isinstance(dataset, (SingleImgSample, Dataset, IterableDataset)):
+    if not isinstance(dataset, (SingleImgSample, InferenceImgDataset, InferenceVideoDataset)):
         raise ValueError((
-            f"imgs is expected to be of type {SingleImgSample.__name__} or"
-            f" {Dataset.__name__}, got {type(dataset)}"
+            f"input dataset is expected to be of type {SingleImgSample.__name__},"
+            f" {InferenceImgDataset.__name__} or {InferenceVideoDataset.__name__}, got {type(dataset)}"
         ))
     model.to(device)
     num_classes = model.num_classes
@@ -213,12 +213,7 @@ def evaluate_frames(
             touched_img, og_img = dataset[0]
             touched_img = touched_img.to(device).unsqueeze(0)
             og_img = og_img.to(device).unsqueeze(0)
-            preds, protos = model(
-                touched_img, 
-                combine_scales=True, 
-                to_img_scale=True, 
-                og_size=og_img.shape[1:]
-            )
+            preds, protos = model(touched_img, inference=True, og_size=og_img.shape[1:])
             summary = post_process_preds(
                 og_img,
                 preds,
@@ -230,14 +225,14 @@ def evaluate_frames(
             )
         else:
             summary = None
-            if isinstance(dataset, IterableDataset):
+            if issubclass(dataset.__class__, IterableDataset):
                 if num_workers > 0:
                     logger.warning("num workers will be set to 0 when processing video stream")
                     num_workers = 0
             dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
             vwriter = None
             start_idx = 0
-            for i, (touched_img_batch, og_img_batch) in tqdm.tqdm(enumerate(dataloader)):
+            for touched_img_batch, og_img_batch in tqdm.tqdm(dataloader):
                 if is_video and (vwriter is None):
                     w, h = og_img_batch.shape[-1], og_img_batch.shape[-2]
                     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -249,12 +244,7 @@ def evaluate_frames(
                     )
                 touched_img_batch = touched_img_batch.to(device)
                 og_img_batch = og_img_batch.to(device)
-                preds, protos = model(
-                    touched_img_batch, 
-                    combine_scales=True, 
-                    to_img_scale=True, 
-                    og_size=og_img_batch.shape[2:]
-                )
+                preds, protos = model(touched_img_batch, inference=True, og_size=og_img_batch.shape[2:])
                 summary_df = post_process_preds(
                     og_img_batch, 
                     preds, 
@@ -282,36 +272,34 @@ def evaluate_frames(
 
 
 def run(args: argparse.Namespace, config_path: str):
+    config = load_yaml(config_path)
     is_video = False
+    img_wh = config["train_config"]["img_config"]["img_wh"]
     if os.path.isdir(args.path):
         dataset = InferenceImgDataset(
             img_dir=args.path, 
             img_exts=["png", "jpg", "jpeg"], 
-            img_wh=args.img_size
+            img_wh=img_wh
         )
     elif os.path.isfile(args.path):
         if args.path.endswith(("avi", "mkv", "mp4")):
             is_video = True
             dataset = InferenceVideoDataset(
                 video_path=args.path, 
-                img_wh=args.img_size, 
+                img_wh=img_wh, 
                 frame_skips=args.frame_skips
             )
         elif args.path.endswith(("png", "jpg", "jpeg")):
-            dataset = SingleImgSample(args.path, args.img_size)
+            dataset = SingleImgSample(args.path, img_wh)
     else:
         raise OSError(f"{args.path} not found")
     
-    config = load_yaml(config_path)["model_config"]
-    anchors = load_yaml(ANCHORS_PATH)["anchors"]
-
     state_dict = torch.load(args.weights_path, map_location=args.device)
-    model = SegmentationNetwork(
+    model = SegmentationNet(
         in_channels=3, 
         num_classes=state_dict["NUM_CLASSES"], 
-        config=config, 
-        anchors=anchors,
-        num_keypoints=config["num_keypoints"],
+        config=config["model_config"],
+        num_keypoints=config["model_config"]["num_keypoints"],
     )
     model.load_state_dict(state_dict["NETWORK_PARAMS"])
     model.eval()
@@ -344,13 +332,12 @@ def run(args: argparse.Namespace, config_path: str):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
-    best_model_path = f"saved_model/segmentation/best_model/{SegmentationNetwork.__name__}.pth.tar"
+    best_model_path = f"saved_model/segmentation/best_model/{SegmentationNet.__name__}.pth.tar"
     config_path = os.path.join(Path(best_model_path).parent.resolve(), "config", "config.yaml")
     device = "cpu" if not torch.cuda.is_available() else "cuda"
     parser = argparse.ArgumentParser(description="Segmentation Inference")
     parser.add_argument("--path", type=str, metavar="", help="input path (image, folder of images or single video)")
     parser.add_argument("--batch_size", type=int, default=32, metavar="", help="Training batch size")
-    parser.add_argument("--img_size", type=int, default=640, metavar="", help="Height and width of images")
     parser.add_argument("--weights_path", type=str, default=best_model_path, metavar="", help="saved model path")
     parser.add_argument("--dl_workers", type=int, default=0, metavar="", help="Number of dataloader workers")
     parser.add_argument("--device", type=str, default=device, metavar="", help="device to run inference on")

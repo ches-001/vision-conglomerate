@@ -1,0 +1,91 @@
+model_config:
+  weight_init: "uniform"
+  architecture: "base"
+
+  base_arch_config:
+    encoder_config:
+      width_multiple: 1.0
+
+    decoder_config:
+      width_multiple: 1.0
+
+  advanced_arch_config:
+    encoder_modules: ["CSPNet", "RepBiPAN"]
+    decoder_modules: ["DeconvRepBiPAN", "DeconvCSPNet"]
+
+    encoder_config:
+      cspnet_config:
+        width_multiple: 0.5
+        depth_multiple: 0.3
+        dropout: 0.0
+
+      repbipan_config:
+        width_multiple: 0.5
+        depth_multiple: 0.3
+        cspsppf_poolk: 5
+        upsample_mode: "nearest"
+        bic_with_conv: False
+
+      bipan_config:
+        width_multiple: 0.5
+        depth_multiple: 0.3
+        sppf_poolk: 5
+        upsample_mode: "nearest"
+        bic_with_conv: False
+
+    decoder_config:
+      deconvcspnet_config:
+        width_multiple: 0.5
+        depth_multiple: 0.3
+        dropout: 0.0
+
+      deconvrepbipan_config:
+        width_multiple: 0.5
+        depth_multiple: 0.3
+        cspsppf_poolk: 5
+        upsample_mode: "nearest"
+        bic_with_conv: False
+
+      deconvbipan_config:
+        width_multiple: 0.5
+        depth_multiple: 0.3
+        sppf_poolk: 5
+        upsample_mode: "nearest"
+        bic_with_conv: False
+
+
+train_config:
+  device: cuda
+  data_path: data/tracknet
+  tp_dist_tol: 4.0
+  heatmap_threshold: 128
+  hough_grad_config:
+    method: "HOUGH_GRADIENT"
+    dp: 1
+    minDist: 1
+    param1: 50
+    param2: 2
+    minRadius: 2
+    maxRadius: 7
+
+  dataloader_config:
+    shuffle: True
+    # num_workers: 1
+
+  img_config:
+    img_wh: [640, 352]
+    num_stacks: 3
+    avg_diameter: 5
+
+  optimizer_config:
+    name: Adadelta
+    lr: 1.0
+    rho: 0.9
+    eps: 1.0e-6
+    weight_decay: 0
+
+  lr_scheduler_config:
+    T_0: 250
+    T_mult: 1
+    eta_min: 0.7
+    name: CosineAnnealingWarmRestarts

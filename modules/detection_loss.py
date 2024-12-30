@@ -3,7 +3,7 @@ import warnings
 import torch.nn as nn
 import pandas as pd
 from dataset.detection_dataset import DetectionDataset
-from modules.detection import DetectionNetwork
+from modules.detection import DetectionNet
 warnings.filterwarnings(action="ignore")
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from typing import Tuple, Optional, Dict, List, Union
@@ -42,7 +42,7 @@ class FocalLoss(nn.Module):
 class DetectionLoss(nn.Module):
     def __init__(
         self,
-        model: DetectionNetwork,
+        model: DetectionNet,
         anchor_t: float=4.0,
         edge_t: float=0.5,
         box_w: float=1.0,

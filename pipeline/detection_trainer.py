@@ -7,8 +7,7 @@ import logging
 import torch
 import pandas as pd
 from datetime import datetime
-from modules.detection import DetectionNetwork
-from modules.detection_loss import DetectionLoss
+from modules.detection import DetectionNet
 from matplotlib import pyplot as plt
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -24,8 +23,8 @@ class TrainDetectionPipeline:
 
     def __init__(
         self, 
-        model: DetectionNetwork,
-        loss_fn: DetectionLoss,
+        model: DetectionNet,
+        loss_fn: Any,
         optimizer: torch.optim.Optimizer,
         lr_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler]=None,
         lr_schedule_interval: int=1,
@@ -185,7 +184,8 @@ class TrainDetectionPipeline:
                 self.optimizer.step()
             # sum metrics across all batches
             for key in batch_metrics.keys(): 
-                if key not in metrics.keys(): metrics[key] = batch_metrics[key]
+                if key not in metrics.keys(): 
+                    metrics[key] = batch_metrics[key]
                 else: metrics[key] += batch_metrics[key]
 
         # average metrics from all batches
@@ -222,16 +222,26 @@ class TrainDetectionPipeline:
         if mode not in valid_modes:
             raise ValueError(f"mode must be one of {valid_modes}, got {mode}")
         df = pd.DataFrame(getattr(self, f"_{mode}_metrics"))
-        fig, axs = plt.subplots(len(df.columns), 1, figsize=figsize)
-        
-        for i, col in enumerate(df.columns):
-            label = col.replace("_", " ").title()
-            axs[i].plot(df[col].to_numpy())
-            axs[1].grid(visible=True)
-            axs[i].set_xlabel("Epoch")
-            axs[i].set_ylabel(label)
-            axs[i].set_title(f"[{mode.title()}] {label} vs Epoch", fontsize=24)
-            axs[i].tick_params(axis='x', which='major', labelsize=20)
+        nrows = len(df.columns)
+        fig, axs = plt.subplots(nrows, 1, figsize=figsize)
+
+        if nrows == 1:
+            label = df.columns[0]
+            axs.plot(df[df.columns[0]].to_numpy())
+            axs.grid(visible=True)
+            axs.set_xlabel("Epoch")
+            axs.set_ylabel(label)
+            axs.set_title(f"[{mode.title()}] {label} vs Epoch", fontsize=24)
+            axs.tick_params(axis='x', which='major', labelsize=20)
+        else:
+            for i, col in enumerate(df.columns):
+                label = col.replace("_", " ").title()
+                axs[i].plot(df[col].to_numpy())
+                axs[i].grid(visible=True)
+                axs[i].set_xlabel("Epoch")
+                axs[i].set_ylabel(label)
+                axs[i].set_title(f"[{mode.title()}] {label} vs Epoch", fontsize=24)
+                axs[i].tick_params(axis='x', which='major', labelsize=20)
 
         if os.path.isdir(self.metrics_dir): os.makedirs(self.metrics_dir, exist_ok=True)
         fig.savefig(os.path.join(self.metrics_dir, f"{mode}_metrics_plot.jpg"))

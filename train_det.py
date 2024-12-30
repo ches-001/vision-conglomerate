@@ -7,7 +7,7 @@ import argparse
 import numpy as np
 from torch.utils.data import DataLoader, Sampler, DistributedSampler
 from dataset.detection_dataset import DetectionDataset
-from modules.detection import DetectionNetwork
+from modules.detection import DetectionNet
 from modules.detection_loss import DetectionLoss
 from pipeline.detection_trainer import TrainDetectionPipeline
 from utils.utils import load_yaml
@@ -33,8 +33,8 @@ def make_model(
         num_classes: int, 
         config: Dict[str, Any], 
         anchors: Dict[str, Any], 
-        num_keypoints: Optional[int]=None) -> DetectionNetwork:
-    model = DetectionNetwork(
+        num_keypoints: Optional[int]=None) -> DetectionNet:
+    model = DetectionNet(
         in_channels=in_channels, 
         num_classes=num_classes, 
         config=config,
@@ -44,12 +44,12 @@ def make_model(
     model.train()
     return model
 
-def make_loss_fn(model: DetectionNetwork, class_weights: torch.Tensor, **kwargs) -> DetectionLoss:
+def make_loss_fn(model: DetectionNet, class_weights: torch.Tensor, **kwargs) -> DetectionLoss:
     return DetectionLoss(model, class_weights=class_weights, **kwargs)
 
-def make_optimizer(model: DetectionNetwork, **kwargs) -> torch.optim.Optimizer:
+def make_optimizer(model: DetectionNet, **kwargs) -> torch.optim.Optimizer:
     optimizer_name = kwargs.pop("name")
-    kwargs["lr"] * torch.cuda.device_count()
+    kwargs["lr"] *= torch.cuda.device_count()
     optimizer = getattr(torch.optim, optimizer_name)(model.parameters(), **kwargs)
     return optimizer
 

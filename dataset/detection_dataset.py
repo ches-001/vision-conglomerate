@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 from typing import *
-from utils.utils import load_bbox_labels, load_and_process_img
+from utils.utils import load_bbox_labels, load_and_process_img, xywh2x1y1x2y2
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,24 @@ class DetectionDataset(Dataset):
         img_file = self.img_files[idx]
         annotation_file = self.annotation_files[idx]
         # bbox_only set to False, incase keypoint annotations exists
-        boxes = load_bbox_labels(annotation_file, bbox_only=False)
+        raw_labels = load_bbox_labels(annotation_file, bbox_only=False)
+
+        if raw_labels.shape[1] > 5:
+            # scale keypoint coordinates to be relative to corresponding bbox dimensions rather image dimensions
+            bbox = raw_labels[:, :5]
+            keypoints = raw_labels[:, 5:].reshape(raw_labels.shape[0], -1, 3)
+            bbox_xyxy = xywh2x1y1x2y2(bbox[:, 1:])
+            keypoints[..., :2] = (
+                (keypoints[..., :2] - bbox_xyxy[:, None, :2]) / (bbox_xyxy[:, None, 2:] - bbox_xyxy[:, None, :2])
+            ).clip(min=0.0, max=1.0)
+            keypoints = keypoints.reshape(keypoints.shape[0], -1)
+            raw_labels = np.concatenate([bbox, keypoints], axis=1)
+            raw_labels = np.ascontiguousarray(raw_labels)
+
         img = load_and_process_img(img_file, img_wh=self.img_wh[::-1], permute=True, scale=True, convert_to="RGB")
-        labels = torch.zeros((boxes.shape[0], boxes.shape[1]+1), dtype=torch.float32)
+        labels = torch.zeros((raw_labels.shape[0], raw_labels.shape[1]+1), dtype=torch.float32)
         if labels.shape[0] > 0:
-            labels[:, 1:] = torch.from_numpy(boxes).to(dtype=torch.float32)
+            labels[:, 1:] = torch.from_numpy(raw_labels).to(dtype=torch.float32)
         return img, labels
     
     def get_class_weights(self, device: Optional[str]=None) -> torch.Tensor:

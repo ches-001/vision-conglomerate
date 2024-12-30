@@ -1,20 +1,18 @@
 model_config:
   train_anchors: True
   num_masks: 32
-  backbone: CSPBasedBackBone
-  neck: RepBiPANNeck
-  head: EffiDeHead
+  backbone: CSPBackBone
+  neck: RepBiPAN
+  head: EffiDecHead
 
   protos_config: 
     c_h: 256
     upsample_mode: "nearest"
 
   # backbone configs
-  cspbasedbackbone_config:
+  cspbackbone_config:
     width_multiple: 0.5
     depth_multiple: 0.3
-    c3_depths: null
-    channel_outs: null
     dropout: 0.0
 
   resnetbackbone_config:
@@ -23,26 +21,22 @@ model_config:
     dropout: 0.0
 
   # neck configs
-  repbipanneck_config:
+  repbipan_config:
     width_multiple: 0.5
     depth_multiple: 0.3
-    channel_outs: null
-    repblock_depths: null
     cspsppf_poolk: 5
     upsample_mode: "nearest"
     bic_with_conv: False
 
-  bipanneck_config:
+  bipan_config:
     width_multiple: 0.5
     depth_multiple: 0.3
-    channel_outs: null
-    c3_depths: null
     sppf_poolk: 5
     upsample_mode: "nearest"
     bic_with_conv: False
 
   # head configs
-  effidehead_config:
+  effidechead_config:
     width_multiple: 0.5
     reg_fmap_depth: 1
     cls_fmap_depth: 1

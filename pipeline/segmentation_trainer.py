@@ -52,7 +52,8 @@ class TrainSegmentationPipeline(TrainDetectionPipeline):
                 self.optimizer.step()
             # sum metrics across all batches
             for key in batch_metrics.keys(): 
-                if key not in metrics.keys(): metrics[key] = batch_metrics[key]
+                if key not in metrics.keys(): 
+                    metrics[key] = batch_metrics[key]
                 else: metrics[key] += batch_metrics[key]
 
         # average metrics from all batches

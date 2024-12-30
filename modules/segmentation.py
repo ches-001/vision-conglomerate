@@ -1,15 +1,14 @@
 import torch
-import torch.nn as nn
 from . import common
-from .detection import DetectionNetwork
+from .detection import DetectionNet
 from typing import *
 
 
-class SegmentationNetwork(DetectionNetwork):
+class SegmentationNet(DetectionNet):
     def __init__(self, *args, **kwargs):
-        super(SegmentationNetwork, self).__init__(*args, **kwargs)
+        super(SegmentationNet, self).__init__(*args, **kwargs)
         self.proto_seg_module = common.ProtoSegModule(
-            self.neck.neck_out_channels[0], 
+            self.neck.out_fmaps_channels[1], 
             self.config["num_masks"], 
             **self.config["protos_config"]
         )
@@ -29,5 +28,5 @@ class SegmentationNetwork(DetectionNetwork):
         # Note: This technique is inspired from the YOLACT (You Only Look at Transformers) paper
         # https://arxiv.org/pdf/1904.02689. It is not exactly it but it is similar, for example,
         # in the original YOLACT, f=4 and not 2.
-        preds, protos = DetectionNetwork.forward(self, *args, **kwargs)
+        preds, protos = DetectionNet.forward(self, *args, **kwargs)
         return preds, protos

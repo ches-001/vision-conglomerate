@@ -7,7 +7,7 @@ import argparse
 import numpy as np
 from torch.utils.data import DataLoader, Sampler, DistributedSampler
 from dataset.segmentation_dataset import SegmentationDataset
-from modules.segmentation import SegmentationNetwork
+from modules.segmentation import SegmentationNet
 from modules.segmentation_loss import SegmentationLoss
 from pipeline.segmentation_trainer import TrainSegmentationPipeline
 from utils.utils import load_yaml
@@ -33,8 +33,8 @@ def make_model(
         num_classes: int, 
         config: Dict[str, Any], 
         anchors: Dict[str, Any], 
-        num_keypoints: Optional[int]=None) -> SegmentationNetwork:
-    model = SegmentationNetwork(
+        num_keypoints: Optional[int]=None) -> SegmentationNet:
+    model = SegmentationNet(
         in_channels=in_channels, 
         num_classes=num_classes, 
         config=config,
@@ -44,12 +44,12 @@ def make_model(
     model.train()
     return model
 
-def make_loss_fn(model: SegmentationNetwork, class_weights: torch.Tensor, overlap_masks: bool, **kwargs) -> SegmentationLoss:
+def make_loss_fn(model: SegmentationNet, class_weights: torch.Tensor, overlap_masks: bool, **kwargs) -> SegmentationLoss:
     return SegmentationLoss(model=model, class_weights=class_weights, overlap_masks=overlap_masks, **kwargs)
 
-def make_optimizer(model: SegmentationNetwork, **kwargs) -> torch.optim.Optimizer:
+def make_optimizer(model: SegmentationNet, **kwargs) -> torch.optim.Optimizer:
     optimizer_name = kwargs.pop("name")
-    kwargs["lr"] = kwargs["lr"] * torch.cuda.device_count()
+    kwargs["lr"] *= torch.cuda.device_count()
     optimizer = getattr(torch.optim, optimizer_name)(model.parameters(), **kwargs)
     return optimizer
 
