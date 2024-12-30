@@ -33,16 +33,15 @@ To run inference on your test data, use the `inference_seg.py` or `inference_det
 
 Finally, you can create a "classmap" folder to store the class index to label map in a json file called `classmap.json`. This file will be stored in `classmap/detection/classmap.json` or `classmap/segmentation/classmap.json` depending on the task, the creation of this file is optional, if it not created, class indexes will simply be used in the detection outputs. The file format is like so:
 
-```json
+```
 [
-    { "id": 0, "name": "ball-raket-gender-net-court", "supercategory": "none" },
-    { "id": 1, "name": "allcourt", "supercategory": "ball-raket-gender-net-court" },
-    ...
-    { "id": 17, "name": "youngfemale", "supercategory": "ball-raket-gender-net-court" },
-    { "id": 18, "name": "youngmale", "supercategory": "ball-raket-gender-net-court" }
+    { "id": 0, "name": "<super-categories>", "supercategory": "none" },
+    { "id": 1, "name": "<category>", "supercategory": "<supercategory>" },
 ]
 ```
+and so on:
+
 Each index of this list (after the first) corresponds to the index class index, so index 0 of the list is:
  ```json 
- { "id": 1, "name": "allcourt", "supercategory": "ball-raket-gender-net-court" }
+ { "id": 1, "name": "<category>", "supercategory": "<supercategory>" }
 ```
